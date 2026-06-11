@@ -6,3 +6,5 @@ dist/
 .vite/
 *.class
 *.log
+temporary file
+~
