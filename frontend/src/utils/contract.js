@@ -11,11 +11,12 @@ const ABI = [
   "function isPollActive(uint256) view returns (bool)"
 ]
 
-const CONTRACT_ADDRESS = import.meta.env.VITE_CONTRACT_ADDRESS || '0x67d269191c92Caf3cD7723F116c85e6E9bf55933'
+const CONTRACT_ADDRESS = import.meta.env.VITE_CONTRACT_ADDRESS || ''
+const READ_RPC = import.meta.env.VITE_RPC_URL || 'http://localhost:8545'
 
-/** 获取只读合约实例 (直接连节点) */
+/** 获取只读合约实例 */
 export function getReadContract() {
-  const provider = new ethers.JsonRpcProvider('http://localhost:8545')
+  const provider = new ethers.JsonRpcProvider(READ_RPC)
   return new ethers.Contract(CONTRACT_ADDRESS, ABI, provider)
 }
 

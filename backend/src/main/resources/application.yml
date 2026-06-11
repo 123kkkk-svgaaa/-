@@ -7,10 +7,6 @@ spring:
     username: root
     password: root
     driver-class-name: com.mysql.cj.jdbc.Driver
-  redis:
-    host: localhost
-    port: 6379
-
 mybatis-plus:
   mapper-locations: classpath:mapper/*.xml
   configuration:
@@ -22,7 +18,7 @@ mybatis-plus:
 # Web3j 配置
 web3j:
   node-url: http://localhost:8545
-  contract-address: "0x67d269191c92Caf3cD7723F116c85e6E9bf55933"
+  contract-address: "0x5FbDB2315678afecb367f032d93F642f64180aa3"
 
 # JWT 配置
 jwt:

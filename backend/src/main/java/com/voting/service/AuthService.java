@@ -1,10 +1,12 @@
 package com.voting.service;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+import com.voting.cache.InMemoryCache;
 import com.voting.entity.User;
 import com.voting.mapper.UserMapper;
 import com.voting.util.JwtUtil;
-import org.springframework.data.redis.core.RedisTemplate;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 import org.web3j.crypto.Keys;
 import org.web3j.crypto.Sign;
@@ -17,33 +19,34 @@ import java.util.Arrays;
 import java.util.concurrent.TimeUnit;
 
 /**
- * 认证服务 — 钱包签名登录
+ * Auth service - wallet signature login
  */
 @Service
 public class AuthService {
 
+    private static final Logger log = LoggerFactory.getLogger(AuthService.class);
+
     private final UserMapper userMapper;
-    private final RedisTemplate<String, String> redisTemplate;
+    private final InMemoryCache cache;
     private final JwtUtil jwtUtil;
     private final SecureRandom random = new SecureRandom();
 
     public AuthService(UserMapper userMapper,
-                       RedisTemplate<String, String> redisTemplate,
+                       InMemoryCache cache,
                        JwtUtil jwtUtil) {
         this.userMapper = userMapper;
-        this.redisTemplate = redisTemplate;
+        this.cache = cache;
         this.jwtUtil = jwtUtil;
     }
 
     /**
-     * 获取登录随机数 — 前端用此 nonce 让用户签名后传回
+     * Generate login nonce for MetaMask signing.
      */
     public String getNonce(String address) {
         String nonce = String.format("%06d", random.nextInt(1000000));
-        // 缓存 nonce，5 分钟有效
-        redisTemplate.opsForValue()
-                .set("user:nonce:" + address, nonce, 5, TimeUnit.MINUTES);
-        // 首次登录自动创建用户记录
+        // Cache nonce, 5 minutes TTL
+        cache.set("user:nonce:" + address, nonce, 5, TimeUnit.MINUTES);
+        // Auto-create user record on first login
         if (!exists(address)) {
             User user = new User();
             user.setWalletAddress(address);
@@ -54,32 +57,31 @@ public class AuthService {
     }
 
     /**
-     * 验证签名并返回 JWT
-     * @param address   用户钱包地址
-     * @param signature MetaMask personal_sign 签名结果
-     * @return JWT token
+     * Verify signature and return JWT token.
      */
     public String login(String address, String signature) {
-        // 1. 获取缓存的 nonce
-        String nonce = redisTemplate.opsForValue().get("user:nonce:" + address);
+        // 1. Get cached nonce
+        String nonce = cache.get("user:nonce:" + address);
         if (nonce == null) {
-            throw new RuntimeException("nonce 已过期，请重新获取");
+            log.warn("Login failed: nonce expired for {}", address);
+            throw new RuntimeException("Nonce expired, please request a new one");
         }
-        // 2. 构建签名原文 (与前端保持一致)
+        // 2. Build signed message (must match frontend)
         String message = "Login to DApp Voting: " + nonce;
-        // 3. 从签名恢复地址并验证
+        // 3. Recover address and verify
         String recovered = recoverAddress(message, signature);
         if (!recovered.equalsIgnoreCase(address)) {
-            throw new RuntimeException("签名验证失败");
+            log.warn("Login failed: signature mismatch for {}", address);
+            throw new RuntimeException("Signature verification failed");
         }
-        // 4. 删除已用 nonce (防重放)
-        redisTemplate.delete("user:nonce:" + address);
-        // 5. 生成 JWT
+        // 4. Delete used nonce (anti-replay)
+        cache.delete("user:nonce:" + address);
+        // 5. Generate JWT
         return jwtUtil.generateToken(address);
     }
 
     /**
-     * 从以太坊 personal_sign 签名恢复地址
+     * Recover address from Ethereum personal_sign signature.
      */
     private String recoverAddress(String message, String signature) {
         String prefix = "Ethereum Signed Message:\n"
@@ -96,8 +98,12 @@ public class AuthService {
                 Arrays.copyOfRange(sigBytes, 0, 32),
                 Arrays.copyOfRange(sigBytes, 32, 64));
 
-        BigInteger publicKey = Sign.signedMessageHashToKey(msgHash, sigData);
-        return Keys.getAddress(publicKey);
+        try {
+            BigInteger publicKey = Sign.signedMessageHashToKey(msgHash, sigData);
+            return Keys.getAddress(publicKey);
+        } catch (Exception e) {
+            throw new RuntimeException("Failed to recover address from signature", e);
+        }
     }
 
     private boolean exists(String address) {

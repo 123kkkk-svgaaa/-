@@ -20,8 +20,9 @@
 </template>
 
 <script setup>
+import { onMounted, onUnmounted } from 'vue'
 import { useUserStore } from '../stores/user'
-import { connectWallet, signMessage } from '../utils/wallet'
+import { connectWallet, signMessage, onAccountsChanged, onChainChanged } from '../utils/wallet'
 import { getNonce, login } from '../api/auth'
 import { ElMessage } from 'element-plus'
 
@@ -40,6 +41,24 @@ async function handleConnect() {
     ElMessage.error(e.message || '连接失败')
   }
 }
+
+// 监听 MetaMask 账户切换
+onMounted(() => {
+  onAccountsChanged((accounts) => {
+    if (accounts.length === 0) {
+      store.logout()
+      ElMessage.warning('钱包已断开')
+      location.reload()
+    } else {
+      store.setAuth(accounts[0], store.token)
+      ElMessage.info('账户已切换: ' + accounts[0].slice(0, 8) + '...')
+    }
+  })
+  onChainChanged(() => {
+    ElMessage.warning('网络已切换，请刷新页面')
+    location.reload()
+  })
+})
 </script>
 
 <style scoped>

@@ -4,6 +4,8 @@ import io.jsonwebtoken.Claims;
 import io.jsonwebtoken.Jwts;
 import io.jsonwebtoken.SignatureAlgorithm;
 import io.jsonwebtoken.security.Keys;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
@@ -16,6 +18,8 @@ import java.util.Date;
  */
 @Component
 public class JwtUtil {
+
+    private static final Logger log = LoggerFactory.getLogger(JwtUtil.class);
 
     private final SecretKey key;
     private final long expiration;
@@ -48,6 +52,7 @@ public class JwtUtil {
             parseClaims(token);
             return true;
         } catch (Exception e) {
+            log.debug("JWT validation failed: {}", e.getMessage());
             return false;
         }
     }

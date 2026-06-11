@@ -10,6 +10,7 @@
     </template>
     <p class="desc">{{ poll.description || '暂无描述' }}</p>
     <div class="card-footer">
+      <span>ID: {{ poll.id }}</span>
       <span>{{ poll.options?.length || 0 }} 个选项</span>
       <span class="creator">{{ poll.creatorAddress?.slice(0,8) }}...</span>
     </div>

@@ -39,12 +39,6 @@
             <artifactId>mysql-connector-j</artifactId>
         </dependency>
 
-        <!-- Redis -->
-        <dependency>
-            <groupId>org.springframework.boot</groupId>
-            <artifactId>spring-boot-starter-data-redis</artifactId>
-        </dependency>
-
         <!-- Web3j -->
         <dependency>
             <groupId>org.web3j</groupId>

@@ -1,5 +1,6 @@
 package com.voting.listener;
 
+import com.voting.cache.InMemoryCache;
 import com.voting.entity.Poll;
 import com.voting.mapper.PollMapper;
 import com.voting.mapper.PollResultMapper;
@@ -9,12 +10,13 @@ import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.context.event.ApplicationReadyEvent;
 import org.springframework.context.event.EventListener;
-import org.springframework.data.redis.core.RedisTemplate;
 import org.springframework.stereotype.Component;
 import org.web3j.abi.EventEncoder;
+import org.web3j.abi.FunctionReturnDecoder;
 import org.web3j.abi.TypeReference;
 import org.web3j.abi.datatypes.Address;
 import org.web3j.abi.datatypes.Event;
+import org.web3j.abi.datatypes.Type;
 import org.web3j.abi.datatypes.generated.Uint256;
 import org.web3j.protocol.Web3j;
 import org.web3j.protocol.core.DefaultBlockParameterName;
@@ -26,12 +28,13 @@ import java.time.Instant;
 import java.time.LocalDateTime;
 import java.time.ZoneId;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.Executors;
 
 /**
- * 合约事件监听器 — 启动后异步监听 PollCreated / VoteCasted 事件
+ * Contract event listener - async listen to PollCreated / VoteCasted events after startup
  */
 @Component
 public class ContractEventListener {
@@ -41,13 +44,12 @@ public class ContractEventListener {
     private final Web3j web3j;
     private final PollMapper pollMapper;
     private final PollResultMapper pollResultMapper;
-    private final RedisTemplate<String, String> redisTemplate;
+    private final InMemoryCache cache;
     private final Web3jService web3jService;
 
     @Value("${web3j.contract-address}")
     private String contractAddress;
 
-    // 链上事件定义 (必须与合约中一致)
     private static final Event POLL_CREATED = new Event(
             "PollCreated",
             Arrays.asList(
@@ -64,17 +66,17 @@ public class ContractEventListener {
 
     public ContractEventListener(Web3j web3j, PollMapper pollMapper,
                                   PollResultMapper pollResultMapper,
-                                  RedisTemplate<String, String> redisTemplate,
+                                  InMemoryCache cache,
                                   Web3jService web3jService) {
         this.web3j = web3j;
         this.pollMapper = pollMapper;
         this.pollResultMapper = pollResultMapper;
-        this.redisTemplate = redisTemplate;
+        this.cache = cache;
         this.web3jService = web3jService;
     }
 
     /**
-     * 应用启动后异步注册事件监听
+     * Register event listener asynchronously after application startup.
      */
     @EventListener(ApplicationReadyEvent.class)
     public void startListening() {
@@ -84,17 +86,16 @@ public class ContractEventListener {
                         DefaultBlockParameterName.EARLIEST,
                         DefaultBlockParameterName.LATEST,
                         contractAddress);
-                // 添加两个事件的 topic
                 filter.addOptionalTopics(
                         EventEncoder.encode(POLL_CREATED),
                         EventEncoder.encode(VOTE_CASTED));
 
                 web3j.ethLogFlowable(filter).subscribe(
                         this::handleEvent,
-                        error -> log.error("事件监听错误: {}", error.getMessage()));
-                log.info("合约事件监听已启动, 地址: {}", contractAddress);
+                        error -> log.error("Event listener error: {}", error.getMessage(), error));
+                log.info("Contract event listener started, address: {}", contractAddress);
             } catch (Exception e) {
-                log.error("启动事件监听失败: {}", e.getMessage(), e);
+                log.error("Failed to start event listener: {}", e.getMessage(), e);
             }
         });
     }
@@ -108,12 +109,12 @@ public class ContractEventListener {
                 handleVoteCasted(logEvent);
             }
         } catch (Exception e) {
-            log.error("处理事件失败: {}", e.getMessage());
+            log.error("Failed to handle event: {}", e.getMessage(), e);
         }
     }
 
     /**
-     * 处理投票创建事件 — 同步到 MySQL
+     * Handle PollCreated event - sync to MySQL
      */
     @SuppressWarnings("unchecked")
     private void handlePollCreated(Log logEvent) {
@@ -132,35 +133,45 @@ public class ContractEventListener {
         poll.setEndTime(toLocalDateTime((Long) chainData.get("endTime")));
         poll.setTxHash(logEvent.getTransactionHash());
 
+        // Skip if already synced (event replay from EARLIEST)
+        if (pollMapper.selectById(poll.getId()) != null) {
+            log.debug("Poll {} already in DB, skipping insert", pollId);
+            return;
+        }
         pollMapper.insert(poll);
-        log.info("同步投票创建: pollId={}, title={}", pollId, poll.getTitle());
+        log.info("Synced poll created: pollId={}, title={}", pollId, poll.getTitle());
     }
 
     /**
-     * 处理投票事件 — 更新 Redis 缓存
+     * Handle VoteCasted event - update cache
      */
+    @SuppressWarnings({"rawtypes", "unchecked"})
     private void handleVoteCasted(Log logEvent) {
         BigInteger pollId = new BigInteger(
                 logEvent.getTopics().get(1).substring(2), 16);
-        BigInteger optionIndex = new BigInteger(
-                logEvent.getTopics().get(3).substring(2), 16);
+
+        // optionIndex is NOT indexed in the event — decode from data field
+        List<Type> decoded = FunctionReturnDecoder.decode(
+                logEvent.getData(),
+                (List) Collections.singletonList(new TypeReference<Uint256>() {}));
+        BigInteger optionIndex = ((Uint256) decoded.get(0)).getValue();
 
         String key = "poll:" + pollId + ":vote_counts";
         String field = optionIndex.toString();
 
-        // Redis 原子自增
-        redisTemplate.opsForHash().increment(key, field, 1);
-        // 记录投票者
+        // Atomic increment in cache
+        cache.hincrBy(key, field, 1);
+        // Record voter
         String voter = "0x" + logEvent.getTopics().get(2).substring(26);
-        redisTemplate.opsForSet().add("poll:" + pollId + ":voters", voter);
+        cache.sadd("poll:" + pollId + ":voters", voter);
 
-        // 异步同步到 MySQL
-        String newCount = (String) redisTemplate.opsForHash().get(key, field);
+        // Sync to MySQL
+        String newCount = cache.hget(key, field);
         pollResultMapper.upsertVoteCount(
                 pollId.longValue(), optionIndex.intValue(),
                 Integer.parseInt(newCount != null ? newCount : "0"));
 
-        log.info("同步投票: pollId={}, option={}, count={}", pollId, optionIndex, newCount);
+        log.info("Synced vote: pollId={}, option={}, count={}", pollId, optionIndex, newCount);
     }
 
     private LocalDateTime toLocalDateTime(Long epochSecond) {

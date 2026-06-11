@@ -61,6 +61,9 @@ async function doCreate() {
   if (validOptions.length < 2) {
     return ElMessage.warning('至少需要 2 个非空选项')
   }
+  if (!window.ethereum) {
+    return ElMessage.warning('请先安装并连接 MetaMask')
+  }
   creating.value = true
   try {
     const contract = await getWriteContract()

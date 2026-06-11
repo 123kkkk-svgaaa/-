@@ -2,6 +2,7 @@
   <div v-if="poll">
     <h2>{{ poll.title }}</h2>
     <p class="meta">
+      投票 ID: {{ poll.id }} |
       创建者: {{ poll.creatorAddress?.slice(0,10) }}... |
       结束时间: {{ poll.endTime }}
       <el-tag :type="active ? 'success' : 'danger'" size="small" style="margin-left:10px">
@@ -30,6 +31,10 @@
       <el-alert title="你已在此投票中投过票" type="info" show-icon :closable="false" />
     </div>
   </div>
+  <div v-else-if="loading" class="loading-center">
+    <el-skeleton :rows="5" animated />
+  </div>
+  <el-empty v-else description="投票不存在或加载失败" />
 </template>
 
 <script setup>
@@ -48,23 +53,33 @@ const voteCounts = ref([])
 const selectedOption = ref(null)
 const voting = ref(false)
 const hasVoted = ref(false)
+const loading = ref(true)
 
 const active = computed(() => poll.value && new Date(poll.value.endTime) > new Date())
 
 onMounted(async () => {
-  const id = route.params.id
-  const { data } = await getPollDetail(id)
-  poll.value = data.poll
-  voteCounts.value = data.voteCounts
+  try {
+    const id = route.params.id
+    const { data } = await getPollDetail(id)
+    poll.value = data.poll
+    voteCounts.value = data.voteCounts
 
-  // 检查当前用户是否已投票
-  if (store.address) {
-    const contract = getReadContract()
-    hasVoted.value = await contract.getHasVoted(id, store.address)
+    // 检查当前用户是否已投票
+    if (store.address) {
+      const contract = getReadContract()
+      hasVoted.value = await contract.getHasVoted(id, store.address)
+    }
+  } catch (e) {
+    ElMessage.error('加载投票详情失败')
+  } finally {
+    loading.value = false
   }
 })
 
 async function doVote() {
+  if (!store.address) {
+    return ElMessage.warning('请先连接钱包')
+  }
   if (selectedOption.value === null) {
     return ElMessage.warning('请先选择一个选项')
   }
@@ -96,4 +111,5 @@ async function doVote() {
 .desc { background: #f0f2f5; padding: 16px; border-radius: 8px; margin: 16px 0; }
 .vote-area { margin-top: 24px; }
 .option-group { display: flex; flex-direction: column; gap: 12px; margin-top: 12px; }
+.loading-center { padding: 60px 0; }
 </style>

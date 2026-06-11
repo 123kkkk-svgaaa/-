@@ -1,5 +1,7 @@
 package com.voting.service;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import org.web3j.abi.FunctionEncoder;
@@ -20,6 +22,8 @@ import java.util.stream.Collectors;
  */
 @Service
 public class Web3jService {
+
+    private static final Logger log = LoggerFactory.getLogger(Web3jService.class);
 
     private final Web3j web3j;
 
@@ -49,6 +53,7 @@ public class Web3jService {
 
         List<Type> result = callContract(function);
         if (result == null || result.isEmpty()) {
+            log.error("getPollFromChain returned empty for pollId={}", pollId);
             throw new RuntimeException("链上查询失败");
         }
 
@@ -101,11 +106,16 @@ public class Web3jService {
 
             EthCall response = web3j.ethCall(tx, DefaultBlockParameterName.LATEST).send();
             if (response.hasError()) {
+                log.error("Contract call error: {} (function: {})",
+                        response.getError().getMessage(), function.getName());
                 throw new RuntimeException("合约调用错误: " + response.getError().getMessage());
             }
             return FunctionReturnDecoder.decode(
                     response.getValue(), function.getOutputParameters());
+        } catch (RuntimeException e) {
+            throw e;
         } catch (Exception e) {
+            log.error("Contract call failed: {} (function: {})", e.getMessage(), function.getName(), e);
             throw new RuntimeException("合约调用失败: " + e.getMessage(), e);
         }
     }
