@@ -98,9 +98,31 @@ public class PollService {
         Map<String, Object> result = new HashMap<>();
         result.put("chain", chainData);
         result.put("local", local);
-        result.put("consistent", local != null
+        // Compare poll metadata + vote counts
+        boolean titleMatch = local != null
                 && chainData.get("title") != null
-                && chainData.get("title").equals(local.getTitle()));
+                && chainData.get("title").equals(local.getTitle());
+
+        // Compare vote counts
+        boolean votesMatch = false;
+        if (local != null) {
+            List<Integer> localCounts = getVoteCounts(pollId, local.getOptions().size());
+            @SuppressWarnings("unchecked")
+            List<Long> chainCounts = (List<Long>) chainData.get("voteCounts");
+            if (chainCounts != null && localCounts.size() == chainCounts.size()) {
+                votesMatch = true;
+                for (int i = 0; i < localCounts.size(); i++) {
+                    if (localCounts.get(i).intValue() != chainCounts.get(i).intValue()) {
+                        votesMatch = false;
+                        break;
+                    }
+                }
+            }
+        }
+
+        result.put("titleMatch", titleMatch);
+        result.put("votesMatch", votesMatch);
+        result.put("consistent", titleMatch && votesMatch);
         return result;
     }
 

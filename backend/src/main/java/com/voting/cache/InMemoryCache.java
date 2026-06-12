@@ -30,14 +30,37 @@ public class InMemoryCache {
         return t;
     });
 
+    // Default TTL for hash/set entries: 6 hours (poll lifetime window)
+    private static final long HASH_TTL_MS = TimeUnit.HOURS.toMillis(6);
+    private final ConcurrentMap<String, Long> hashExpiry = new ConcurrentHashMap<>();
+    private final ConcurrentMap<String, Long> setExpiry = new ConcurrentHashMap<>();
+
     @PostConstruct
     public void startCleaner() {
         cleaner.scheduleWithFixedDelay(() -> {
             try {
                 int removed = 0;
+                // String store (explicit TTL)
                 for (var entry : store.entrySet()) {
                     if (entry.getValue().isExpired()) {
                         store.remove(entry.getKey());
+                        removed++;
+                    }
+                }
+                // Hash store (auto-expire after 6h)
+                long now = System.currentTimeMillis();
+                for (var entry : hashExpiry.entrySet()) {
+                    if (now > entry.getValue()) {
+                        hashStore.remove(entry.getKey());
+                        hashExpiry.remove(entry.getKey());
+                        removed++;
+                    }
+                }
+                // Set store (auto-expire after 6h)
+                for (var entry : setExpiry.entrySet()) {
+                    if (now > entry.getValue()) {
+                        setStore.remove(entry.getKey());
+                        setExpiry.remove(entry.getKey());
                         removed++;
                     }
                 }
@@ -80,9 +103,16 @@ public class InMemoryCache {
 
     public void hset(String key, String hashKey, String value) {
         hashStore.computeIfAbsent(key, k -> new ConcurrentHashMap<>()).put(hashKey, value);
+        hashExpiry.put(key, System.currentTimeMillis() + HASH_TTL_MS);
     }
 
     public String hget(String key, String hashKey) {
+        Long expireAt = hashExpiry.get(key);
+        if (expireAt != null && System.currentTimeMillis() > expireAt) {
+            hashStore.remove(key);
+            hashExpiry.remove(key);
+            return null;
+        }
         ConcurrentHashMap<String, String> hash = hashStore.get(key);
         return hash != null ? hash.get(hashKey) : null;
     }
@@ -108,6 +138,7 @@ public class InMemoryCache {
 
     public void sadd(String key, String value) {
         setStore.computeIfAbsent(key, k -> new CopyOnWriteArraySet<>()).add(value);
+        setExpiry.put(key, System.currentTimeMillis() + HASH_TTL_MS);
     }
 
     // === Internal ===

@@ -31,10 +31,15 @@ import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.Executor;
 import java.util.concurrent.Executors;
 
 /**
- * Contract event listener - async listen to PollCreated / VoteCasted events after startup
+ * Contract event listener — initial sync + real-time listening.
+ *
+ * Strategy:
+ *  1. On startup, if DB is empty, pull ALL existing polls from chain.
+ *  2. Then subscribe to LATEST events only, avoiding replay.
  */
 @Component
 public class ContractEventListener {
@@ -76,14 +81,25 @@ public class ContractEventListener {
     }
 
     /**
-     * Register event listener asynchronously after application startup.
+     * After app is ready: initial sync (incremental), then subscribe to new events.
+     * Single-thread executor ensures no race between concurrent event callbacks.
      */
     @EventListener(ApplicationReadyEvent.class)
     public void startListening() {
         Executors.newSingleThreadExecutor().submit(() -> {
             try {
+                // ── Step 1: incremental sync from chain ──
+                initialSyncIfNeeded();
+
+                // ── Step 2: single-thread event handler ──
+                Executor eventExecutor = Executors.newSingleThreadExecutor(r -> {
+                    Thread t = new Thread(r, "event-handler");
+                    t.setDaemon(true);
+                    return t;
+                });
+
                 EthFilter filter = new EthFilter(
-                        DefaultBlockParameterName.EARLIEST,
+                        DefaultBlockParameterName.LATEST,
                         DefaultBlockParameterName.LATEST,
                         contractAddress);
                 filter.addOptionalTopics(
@@ -91,13 +107,61 @@ public class ContractEventListener {
                         EventEncoder.encode(VOTE_CASTED));
 
                 web3j.ethLogFlowable(filter).subscribe(
-                        this::handleEvent,
+                        log -> eventExecutor.execute(() -> handleEvent(log)),
                         error -> log.error("Event listener error: {}", error.getMessage(), error));
                 log.info("Contract event listener started, address: {}", contractAddress);
             } catch (Exception e) {
                 log.error("Failed to start event listener: {}", e.getMessage(), e);
             }
         });
+    }
+
+    /**
+     * Incremental sync: compare DB max poll ID vs chain poll count.
+     * Syncs any polls on chain that are not yet in DB.
+     */
+    @SuppressWarnings("unchecked")
+    private void initialSyncIfNeeded() {
+        try {
+            long chainTotal = web3jService.getPollCount();
+            if (chainTotal == 0) {
+                log.info("Chain has no polls, nothing to sync");
+                return;
+            }
+
+            Long maxPollId = pollMapper.selectMaxPollId();
+            long startFrom = (maxPollId != null) ? maxPollId + 1 : 0;
+
+            if (startFrom >= chainTotal) {
+                log.info("DB up to date (max={}, chainTotal={}), skipping sync", maxPollId, chainTotal);
+                return;
+            }
+
+            log.info("Syncing polls {} to {} (chainTotal={})", startFrom, chainTotal - 1, chainTotal);
+            for (long i = startFrom; i < chainTotal; i++) {
+                Map<String, Object> chainData = web3jService.getPollFromChain(i);
+                Poll poll = new Poll();
+                poll.setId(((Number) chainData.get("id")).longValue());
+                poll.setCreatorAddress((String) chainData.get("creator"));
+                poll.setTitle((String) chainData.get("title"));
+                poll.setDescription((String) chainData.get("description"));
+                poll.setOptions((List<String>) chainData.get("options"));
+                poll.setStartTime(toLocalDateTime(((Number) chainData.get("startTime")).longValue()));
+                poll.setEndTime(toLocalDateTime(((Number) chainData.get("endTime")).longValue()));
+                pollMapper.insert(poll);
+
+                List<Long> counts = (List<Long>) chainData.get("voteCounts");
+                for (int j = 0; j < counts.size(); j++) {
+                    int cnt = counts.get(j).intValue();
+                    pollResultMapper.upsertVoteCount(i, j, cnt);
+                    cache.hset("poll:" + i + ":vote_counts", String.valueOf(j), String.valueOf(cnt));
+                }
+                log.info("  Synced poll {}: {}", i, poll.getTitle());
+            }
+            log.info("Initial sync complete — {} polls synced", chainTotal - startFrom);
+        } catch (Exception e) {
+            log.error("Initial sync failed: {}", e.getMessage(), e);
+        }
     }
 
     private void handleEvent(Log logEvent) {
@@ -114,12 +178,17 @@ public class ContractEventListener {
     }
 
     /**
-     * Handle PollCreated event - sync to MySQL
+     * Handle PollCreated event — sync to MySQL.
      */
     @SuppressWarnings("unchecked")
     private void handlePollCreated(Log logEvent) {
         BigInteger pollId = new BigInteger(
                 logEvent.getTopics().get(1).substring(2), 16);
+
+        if (pollMapper.selectById(pollId.longValue()) != null) {
+            log.debug("Poll {} already in DB, skipping", pollId);
+            return;
+        }
 
         Map<String, Object> chainData = web3jService.getPollFromChain(pollId.longValue());
 
@@ -129,49 +198,42 @@ public class ContractEventListener {
         poll.setTitle((String) chainData.get("title"));
         poll.setDescription((String) chainData.get("description"));
         poll.setOptions((List<String>) chainData.get("options"));
-        poll.setStartTime(toLocalDateTime((Long) chainData.get("startTime")));
-        poll.setEndTime(toLocalDateTime((Long) chainData.get("endTime")));
+        poll.setStartTime(toLocalDateTime(((Number) chainData.get("startTime")).longValue()));
+        poll.setEndTime(toLocalDateTime(((Number) chainData.get("endTime")).longValue()));
         poll.setTxHash(logEvent.getTransactionHash());
 
-        // Skip if already synced (event replay from EARLIEST)
-        if (pollMapper.selectById(poll.getId()) != null) {
-            log.debug("Poll {} already in DB, skipping insert", pollId);
-            return;
-        }
         pollMapper.insert(poll);
         log.info("Synced poll created: pollId={}, title={}", pollId, poll.getTitle());
     }
 
     /**
-     * Handle VoteCasted event - update cache
+     * Handle VoteCasted event — pull fresh counts from chain (race-condition safe).
+     *
+     * Strategy: read authoritative vote counts from chain on every event,
+     * then write to cache + MySQL. This avoids hincrBy drift when the
+     * frontend sync endpoint and the listener process the same vote.
      */
     @SuppressWarnings({"rawtypes", "unchecked"})
     private void handleVoteCasted(Log logEvent) {
         BigInteger pollId = new BigInteger(
                 logEvent.getTopics().get(1).substring(2), 16);
 
-        // optionIndex is NOT indexed in the event — decode from data field
-        List<Type> decoded = FunctionReturnDecoder.decode(
-                logEvent.getData(),
-                (List) Collections.singletonList(new TypeReference<Uint256>() {}));
-        BigInteger optionIndex = ((Uint256) decoded.get(0)).getValue();
+        // Pull authoritative counts from chain
+        List<Long> chainCounts = web3jService.getVoteCountsFromChain(pollId.longValue());
 
+        // Update cache + MySQL for every option (chain is source of truth)
         String key = "poll:" + pollId + ":vote_counts";
-        String field = optionIndex.toString();
+        for (int i = 0; i < chainCounts.size(); i++) {
+            int count = chainCounts.get(i).intValue();
+            cache.hset(key, String.valueOf(i), String.valueOf(count));
+            pollResultMapper.upsertVoteCount(pollId.longValue(), i, count);
+        }
 
-        // Atomic increment in cache
-        cache.hincrBy(key, field, 1);
-        // Record voter
+        // Track voter
         String voter = "0x" + logEvent.getTopics().get(2).substring(26);
         cache.sadd("poll:" + pollId + ":voters", voter);
 
-        // Sync to MySQL
-        String newCount = cache.hget(key, field);
-        pollResultMapper.upsertVoteCount(
-                pollId.longValue(), optionIndex.intValue(),
-                Integer.parseInt(newCount != null ? newCount : "0"));
-
-        log.info("Synced vote: pollId={}, option={}, count={}", pollId, optionIndex, newCount);
+        log.info("Synced vote from chain: pollId={}, counts={}", pollId, chainCounts);
     }
 
     private LocalDateTime toLocalDateTime(Long epochSecond) {

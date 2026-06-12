@@ -1,5 +1,6 @@
 package com.voting.controller;
 
+import com.voting.dto.LoginRequest;
 import com.voting.dto.Result;
 import com.voting.service.AuthService;
 import org.springframework.web.bind.annotation.*;
@@ -30,9 +31,8 @@ public class AuthController {
 
     /** 验证签名登录 */
     @PostMapping("/login")
-    public Result<Map<String, String>> login(@RequestParam String address,
-                                              @RequestParam String sig) {
-        String token = authService.login(address, sig);
+    public Result<Map<String, String>> login(@RequestBody LoginRequest req) {
+        String token = authService.login(req.getAddress(), req.getSignature());
         return Result.ok(Map.of("token", token));
     }
 }

@@ -8,7 +8,9 @@ const ABI = [
   "function getVoteCounts(uint256) view returns (uint256[])",
   "function getHasVoted(uint256,address) view returns (bool)",
   "function getPollCount() view returns (uint256)",
-  "function isPollActive(uint256) view returns (bool)"
+  "function isPollActive(uint256) view returns (bool)",
+  "event PollCreated(uint256 indexed pollId, address indexed creator, uint256 endTime)",
+  "event VoteCasted(uint256 indexed pollId, address indexed voter, uint256 optionIndex)"
 ]
 
 const CONTRACT_ADDRESS = import.meta.env.VITE_CONTRACT_ADDRESS || ''

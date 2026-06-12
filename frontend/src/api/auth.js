@@ -5,5 +5,5 @@ export function getNonce(address) {
 }
 
 export function login(address, sig) {
-  return api.post('/auth/login', null, { params: { address, sig } })
+  return api.post('/auth/login', { address, signature: sig })
 }

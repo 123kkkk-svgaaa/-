@@ -75,9 +75,23 @@ public class Web3jService {
     }
 
     /**
+     * 获取链上投票总数
+     */
+    public long getPollCount() {
+        Function function = new Function(
+                "getPollCount",
+                Collections.emptyList(),
+                Collections.singletonList(new TypeReference<Uint256>() {}));
+
+        List<Type> result = callContract(function);
+        if (result == null || result.isEmpty()) return 0;
+        return ((Uint256) result.get(0)).getValue().longValue();
+    }
+
+    /**
      * 从链上获取票数分布
      */
-    private List<Long> getVoteCountsFromChain(Long pollId) {
+    public List<Long> getVoteCountsFromChain(Long pollId) {
         Function function = new Function(
                 "getVoteCounts",
                 Collections.singletonList(new Uint256(pollId)),
